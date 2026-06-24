@@ -128,7 +128,7 @@ def save_delta_payload(delta: Dict[str, torch.Tensor], save_path: str, metadata:
     torch.save(payload, save_path)
 
 
-def apply_head_delta(edge_model: nn.Module, delta: Dict[str, torch.Tensor]) -> None:
+def apply_head_delta(edge_model, delta: Dict[str, torch.Tensor]) -> None:
     """
     EDGE UTILITY: Injects the incoming float16 delta adjustments back into the
     base edge model layers in-memory prior to ONNX/TensorRT compilation.
@@ -137,22 +137,65 @@ def apply_head_delta(edge_model: nn.Module, delta: Dict[str, torch.Tensor]) -> N
           It is provided for REFERENCE purposes for the edge device integration team who need to
           apply deltas to their base YOLOX-S models in their RTSP camera inferencing scripts.
 
-    Usage (in edge device inference script):
+    Args:
+        edge_model: Can be either:
+            - torch.nn.Module object with state_dict() and load_state_dict() methods
+            - dict containing model state (will be modified in-place)
+        delta: Dictionary of delta tensors to apply (from delta.pth file)
+
+    Usage examples:
+
+        # Example 1: With nn.Module
         from weight_delta import apply_head_delta
-        base_model = load_yolox_model()
+        model = load_yolox_model()
         delta_payload = torch.load("delta.pth")
-        apply_head_delta(base_model, delta_payload['delta'])
-        # ... run inference or export to ONNX/TensorRT ...
+        apply_head_delta(model, delta_payload['delta'])
+
+        # Example 2: With checkpoint dict
+        checkpoint = torch.load("yolox_s.pth")
+        delta_payload = torch.load("delta.pth")
+        apply_head_delta(checkpoint, delta_payload['delta'])
+        # checkpoint is now updated in-place
+        torch.save(checkpoint, "yolox_s_updated.pth")
+
+        # Example 3: With state_dict directly
+        state_dict = torch.load("yolox_s.pth")['model']
+        delta_payload = torch.load("delta.pth")
+        apply_head_delta(state_dict, delta_payload['delta'])
     """
-    current_state = edge_model.state_dict()
-    updated_layers = {}
+    # Determine if edge_model is nn.Module or dict
+    if isinstance(edge_model, nn.Module):
+        # Case 1: nn.Module - use state_dict() interface
+        current_state = edge_model.state_dict()
+        updated_layers = {}
 
-    for key in delta:
-        if key in current_state:
-            updated_layers[key] = current_state[key].float() + delta[key].float()
+        for key in delta:
+            if key in current_state:
+                updated_layers[key] = current_state[key].float() + delta[key].float()
 
-    current_state.update(updated_layers)
-    edge_model.load_state_dict(current_state)
+        current_state.update(updated_layers)
+        edge_model.load_state_dict(current_state)
+
+    elif isinstance(edge_model, dict):
+        # Case 2: Dictionary (checkpoint or state_dict)
+        # Check if it's a checkpoint with 'model' key or direct state_dict
+        if 'model' in edge_model and isinstance(edge_model['model'], dict):
+            # Checkpoint format: {'model': state_dict, 'optimizer': ..., ...}
+            state_dict = edge_model['model']
+        else:
+            # Direct state_dict format
+            state_dict = edge_model
+
+        # Apply delta in-place to the state_dict
+        for key in delta:
+            if key in state_dict:
+                state_dict[key] = state_dict[key].float() + delta[key].float()
+
+    else:
+        raise TypeError(
+            f"edge_model must be either torch.nn.Module or dict, got {type(edge_model).__name__}. "
+            f"If you have a checkpoint file, load it with: checkpoint = torch.load('model.pth')"
+        )
 
 
 def main():
